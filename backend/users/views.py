@@ -1,0 +1,89 @@
+from rest_framework import generics, permissions, serializers, viewsets
+from rest_framework.response import Response
+from rest_framework.views import APIView
+from rest_framework_simplejwt.views import TokenObtainPairView
+
+from .serializers import (
+    EmailOrUsernameTokenObtainPairSerializer,
+    PasswordChangeSerializer,
+    RegisterSerializer,
+    UserManagementSerializer,
+    UserSerializer,
+)
+
+
+class CanManageUsers(permissions.BasePermission):
+    def has_permission(self, request, view):
+        if not request.user.is_authenticated:
+            return False
+        if request.method in permissions.SAFE_METHODS:
+            return request.user.is_staff or request.user.role in {"admin", "supervisor"}
+        return request.user.is_staff or request.user.role == "admin"
+
+    def has_object_permission(self, request, view, obj):
+        if not self.has_permission(request, view):
+            return False
+        if request.method in permissions.SAFE_METHODS:
+            return True
+        return request.user.is_staff or request.user.role == "admin"
+
+
+class UserViewSet(viewsets.ModelViewSet):
+    serializer_class = UserManagementSerializer
+    permission_classes = [CanManageUsers]
+    http_method_names = ["get", "post", "head", "options", "patch", "put"]
+
+    def get_queryset(self):
+        return self.serializer_class.Meta.model.objects.order_by("username")
+
+    def perform_update(self, serializer):
+        # Руководитель может просматривать пользователей, но менять роли может только администратор.
+        if not (self.request.user.is_staff or self.request.user.role == "admin"):
+            serializer.validated_data.pop("role", None)
+            serializer.validated_data.pop("is_active", None)
+        if serializer.instance.id == self.request.user.id and serializer.validated_data.get("is_active") is False:
+            raise serializers.ValidationError({"is_active": "Нельзя заблокировать собственную учётную запись."})
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        raise serializers.ValidationError({"detail": "Удаление сотрудников запрещено. Используйте блокировку."})
+
+
+class AssigneeListView(generics.ListAPIView):
+    """Список активных сотрудников для назначения задач."""
+
+    serializer_class = UserSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return self.serializer_class.Meta.model.objects.filter(is_active=True).order_by("username")
+
+
+class RegisterView(generics.CreateAPIView):
+    serializer_class = RegisterSerializer
+    permission_classes = [permissions.AllowAny]
+
+
+class MeView(APIView):
+    def get(self, request):
+        return Response(UserSerializer(request.user).data)
+
+    def patch(self, request):
+        serializer = UserSerializer(request.user, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
+
+
+class PasswordChangeView(APIView):
+    def post(self, request):
+        serializer = PasswordChangeSerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        request.user.set_password(serializer.validated_data["new_password"])
+        request.user.save(update_fields=["password"])
+        return Response({"detail": "Пароль успешно изменён."})
+
+
+class EmailOrUsernameTokenObtainPairView(TokenObtainPairView):
+    serializer_class = EmailOrUsernameTokenObtainPairSerializer
+
